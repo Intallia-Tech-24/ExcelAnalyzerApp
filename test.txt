@@ -1,0 +1,328 @@
+using System.Windows;
+using System.Windows.Controls;
+using Microsoft.Win32;
+using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Spreadsheet;
+using System.Linq;
+using System;
+using DocumentFormat.OpenXml.Drawing.Spreadsheet;
+using DocumentFormat.OpenXml.Drawing.Charts;
+using DocumentFormat.OpenXml; // Add this line
+
+namespace ExcelAnalyzerApp
+{
+    public partial class MainWindow : Window
+    {
+        private WorkbookPart? _workbookPart; // Declare as nullable
+        private SpreadsheetDocument? _spreadsheetDocument; // Declare as nullable
+        private bool _isComboBoxPopulated = false; // Flag to track ComboBox population
+
+        public MainWindow()
+        {
+            InitializeComponent();
+        }
+
+        private void BrowseButton_Click(object sender, RoutedEventArgs e)
+        {
+            OpenFileDialog openFileDialog = new OpenFileDialog
+            {
+                Filter = "Excel Files|*.xlsx;*.xlsm",
+                Title = "Select an Excel File"
+            };
+
+            if (openFileDialog.ShowDialog() == true)
+            {
+                string filePath = openFileDialog.FileName;
+                AnalyzeExcelFile(filePath);
+            }
+        }
+
+        private void AnalyzeExcelFile(string filePath)
+        {
+            // Dispose the previous document if it's open
+            if (_spreadsheetDocument != null)
+            {
+                _spreadsheetDocument.Dispose(); // Use Dispose instead of Close
+                _spreadsheetDocument = null;
+            }
+
+            ResultsListBox.Items.Clear();
+            WorksheetComboBox.Items.Clear();
+            _isComboBoxPopulated = false; // Reset the flag
+
+            try
+            {
+                // Open the Excel file and keep the document open
+                _spreadsheetDocument = SpreadsheetDocument.Open(filePath, false);
+                _workbookPart = _spreadsheetDocument.WorkbookPart;
+
+                if (_workbookPart == null)
+                {
+                    ResultsListBox.Items.Add("Error: Workbook part is null.");
+                    return;
+                }
+
+                // Populate the ComboBox with worksheet names
+                foreach (var worksheetPart in _workbookPart.WorksheetParts)
+                {
+                    Sheet sheet = _workbookPart.Workbook.Descendants<Sheet>()
+                        .FirstOrDefault(s => s.Id.Value == _workbookPart.GetIdOfPart(worksheetPart));
+
+                    if (sheet != null)
+                    {
+                        WorksheetComboBox.Items.Add(sheet.Name);
+                    }
+                }
+
+                // Enable the SelectionChanged event after populating the ComboBox
+                _isComboBoxPopulated = true;
+
+                // Select the first worksheet by default
+                if (WorksheetComboBox.Items.Count > 0)
+                {
+                    WorksheetComboBox.SelectedIndex = 0;
+                }
+            }
+            catch (Exception ex)
+            {
+                ResultsListBox.Items.Add($"Error loading Excel file: {ex.Message}");
+            }
+        }
+
+        private void WorksheetComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            // Only trigger if the ComboBox is fully populated
+            if (_isComboBoxPopulated && WorksheetComboBox.SelectedItem != null)
+            {
+                string selectedWorksheet = WorksheetComboBox.SelectedItem.ToString();
+                AnalyzeWorksheet(selectedWorksheet);
+            }
+        }
+
+        private void AnalyzeWorksheet(string worksheetName)
+        {
+            ResultsListBox.Items.Clear();
+
+            if (_workbookPart == null)
+            {
+                ResultsListBox.Items.Add("No workbook loaded.");
+                return;
+            }
+
+            try
+            {
+                // Find the selected worksheet
+                Sheet sheet = _workbookPart.Workbook.Descendants<Sheet>()
+                    .FirstOrDefault(s => s.Name == worksheetName);
+
+                if (sheet == null)
+                {
+                    ResultsListBox.Items.Add($"Worksheet '{worksheetName}' not found.");
+                    return;
+                }
+
+                WorksheetPart worksheetPart = (WorksheetPart)_workbookPart.GetPartById(sheet.Id);
+
+                if (worksheetPart == null)
+                {
+                    ResultsListBox.Items.Add($"Worksheet part for '{worksheetName}' not found.");
+                    return;
+                }
+
+                // Detect formulas
+                DetectFormulas(worksheetPart);
+
+                // Detect formatting
+                DetectFormatting(worksheetPart);
+
+                // Detect charts in the worksheet
+                DetectCharts(worksheetPart);
+
+                // Detect pivot tables (if needed)
+                DetectPivotTables(_workbookPart);
+            }
+            catch (Exception ex)
+            {
+                ResultsListBox.Items.Add($"Error analyzing worksheet '{worksheetName}': {ex.Message}");
+            }
+        }
+
+        private void DetectFormulas(WorksheetPart worksheetPart)
+        {
+            try
+            {
+                var cellsWithFormulas = worksheetPart.Worksheet.Descendants<Cell>()
+                    .Where(c => c.CellFormula != null);
+
+                ResultsListBox.Items.Add($"Found {cellsWithFormulas.Count()} cells with formulas:");
+
+                foreach (var cell in cellsWithFormulas)
+                {
+                    string cellReference = cell.CellReference?.Value ?? "Unknown";
+                    ResultsListBox.Items.Add($"- Cell {cellReference} has a formula.");
+                }
+            }
+            catch (Exception ex)
+            {
+                ResultsListBox.Items.Add($"Error detecting formulas: {ex.Message}");
+            }
+        }
+
+        private void DetectFormatting(WorksheetPart worksheetPart)
+        {
+            try
+            {
+                var styledCells = worksheetPart.Worksheet.Descendants<Cell>()
+                    .Where(c => c.StyleIndex != null);
+
+                ResultsListBox.Items.Add($"Found {styledCells.Count()} cells with custom formatting.");
+            }
+            catch (Exception ex)
+            {
+                ResultsListBox.Items.Add($"Error detecting formatting: {ex.Message}");
+            }
+        }
+
+
+private void DetectCharts(WorksheetPart worksheetPart)
+{
+    try
+    {
+        int chartCount = 0;
+
+        // Ensure the DrawingsPart exists
+        if (worksheetPart.DrawingsPart != null)
+        {
+            var worksheetDrawing = worksheetPart.DrawingsPart.WorksheetDrawing;
+
+            if (worksheetDrawing != null)
+            {
+                // Iterate over all TwoCellAnchor elements
+                foreach (var twoCellAnchor in worksheetDrawing.Elements<DocumentFormat.OpenXml.Drawing.Spreadsheet.TwoCellAnchor>())
+                {
+                    // Check for regular charts
+                    if (twoCellAnchor.Descendants<DocumentFormat.OpenXml.Drawing.Charts.ChartReference>().Any())
+                    {
+                        string chartPosition = GetCellPositionFromTwoCellAnchor(twoCellAnchor);
+                        ResultsListBox.Items.Add($"Regular Chart {++chartCount} located at {chartPosition}.");
+                    }
+
+                    // Check for extended charts (cx:chart)
+                    if (twoCellAnchor.Descendants<DocumentFormat.OpenXml.OpenXmlUnknownElement>()
+                        .Any(e => e.LocalName == "chart" && e.NamespaceUri == "http://schemas.microsoft.com/office/drawing/2014/chartex"))
+                    {
+                        string chartPosition = GetCellPositionFromTwoCellAnchor(twoCellAnchor);
+                        ResultsListBox.Items.Add($"Extended Chart {++chartCount} located at {chartPosition}.");
+                    }
+                }
+            }
+            else
+            {
+                ResultsListBox.Items.Add("No WorksheetDrawing found in the DrawingsPart.");
+            }
+        }
+        else
+        {
+            ResultsListBox.Items.Add("No DrawingsPart found in the worksheet.");
+        }
+
+        if (chartCount == 0)
+        {
+            ResultsListBox.Items.Add("No charts found in the worksheet.");
+        }
+        else
+        {
+            ResultsListBox.Items.Add($"Found {chartCount} charts in total.");
+        }
+    }
+    catch (Exception ex)
+    {
+        ResultsListBox.Items.Add($"Error detecting charts: {ex.Message}");
+    }
+}
+
+
+private string GetCellPositionFromTwoCellAnchor(DocumentFormat.OpenXml.Drawing.Spreadsheet.TwoCellAnchor twoCellAnchor)
+{
+    // Get starting position (FromMarker)
+    var fromMarker = twoCellAnchor.FromMarker;
+    string fromCell = GetExcelCellReference(
+        int.Parse(fromMarker.ColumnId.Text),
+        int.Parse(fromMarker.RowId.Text)
+    );
+
+    // Get ending position (ToMarker)
+    var toMarker = twoCellAnchor.ToMarker;
+    string toCell = GetExcelCellReference(
+        int.Parse(toMarker.ColumnId.Text),
+        int.Parse(toMarker.RowId.Text)
+    );
+
+    // Return as Excel-style range
+    return $"{fromCell}:{toCell}";
+}
+
+private string GetExcelCellReference(int columnIndex, int rowIndex)
+{
+    // Convert column index to Excel-style letters (0-based to 1-based)
+    string columnLetter = GetColumnLetters(columnIndex);
+    int excelRow = rowIndex + 1; // Convert 0-based row to 1-based
+
+    return $"{columnLetter}{excelRow}";
+}
+
+private string GetColumnLetters(int columnIndex)
+{
+    string columnLetters = string.Empty;
+
+    while (columnIndex >= 0)
+    {
+        columnLetters = (char)('A' + (columnIndex % 26)) + columnLetters;
+        columnIndex = (columnIndex / 26) - 1;
+    }
+
+    return columnLetters;
+}
+
+
+        private void DetectPivotTables(WorkbookPart workbookPart)
+        {
+            try
+            {
+                int pivotTableCount = 0;
+
+                // Iterate through all worksheets
+                foreach (var worksheetPart in workbookPart.WorksheetParts)
+                {
+                    var pivotTables = worksheetPart.PivotTableParts;
+
+                    foreach (var pivotTablePart in pivotTables)
+                    {
+                        var pivotTableDefinition = pivotTablePart.PivotTableDefinition;
+                        string pivotTableName = pivotTableDefinition?.Name?.Value ?? "Unnamed Pivot Table";
+                        string pivotTableRange = pivotTableDefinition?.Location?.Reference?.Value ?? "Unknown Range";
+
+                        ResultsListBox.Items.Add($"- Pivot Table '{pivotTableName}' is located at {pivotTableRange}.");
+                        pivotTableCount++;
+                    }
+                }
+
+                ResultsListBox.Items.Add($"Found {pivotTableCount} pivot tables.");
+            }
+            catch (Exception ex)
+            {
+                ResultsListBox.Items.Add($"Error detecting pivot tables: {ex.Message}");
+            }
+        }
+
+        // Dispose the document when the window is closed
+        protected override void OnClosed(EventArgs e)
+        {
+            if (_spreadsheetDocument != null)
+            {
+                _spreadsheetDocument.Dispose(); // Use Dispose instead of Close
+            }
+            base.OnClosed(e);
+        }
+    }
+}
